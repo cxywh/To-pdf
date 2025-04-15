@@ -1,10 +1,29 @@
 import os
+import sys
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox, scrolledtext
 from PIL import Image, ImageFile, UnidentifiedImageError
 import win32com.client
 import pythoncom
 import webbrowser
+import pytesseract
+import subprocess
+
+# 处理打包后的资源路径
+def resource_path(relative_path):
+    if hasattr(sys, '_MEIPASS'):
+        return os.path.join(sys._MEIPASS, relative_path)
+    return os.path.join(os.path.abspath("."), relative_path)
+
+# 初始化OCR路径
+if getattr(sys, 'frozen', False):
+    tess_path = resource_path("Tesseract-OCR/tesseract.exe")
+    os.environ["PATH"] += os.pathsep + resource_path("poppler/bin")
+else:
+    tess_path = r'C:\Program Files\Tesseract-OCR\tesseract.exe'  # 开发环境路径
+
+pytesseract.pytesseract.tesseract_cmd = tess_path
+
 
 # 允许加载损坏的图片
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -35,7 +54,7 @@ class DocToPdfConverter:
     def __init__(self, master):
         self.master = master
         master.title("文档/图片转PDF工具")
-        master.geometry("800x750")
+        master.geometry("1200x800")
         master.configure(bg="#f0f8ff")  # 浅蓝色背景
         
         # 设置窗口图标
@@ -43,6 +62,9 @@ class DocToPdfConverter:
             master.iconbitmap('pdf_icon.ico')  # 如果有图标文件
         except:
             pass
+        # 初始化OCR相关配置
+        self.tesseract_path = None
+        self.init_tesseract()
 
         # 检测办公软件
         self.office_type = self.detect_office()
@@ -136,7 +158,37 @@ class DocToPdfConverter:
         self.current_file = ""
         self.supported_doc_exts = self.generate_supported_extensions(self.SUPPORTED_DOC_FORMATS)
         self.supported_image_exts = self.generate_supported_extensions(self.SUPPORTED_IMAGE_FORMATS)
+    
+    def init_tesseract(self):
+        """初始化Tesseract OCR配置"""
+        try:
+            # 尝试自动检测路径
+            possible_paths = [
+                r'C:\Program Files\Tesseract-OCR\tesseract.exe',
+                r'C:\Program Files (x86)\Tesseract-OCR\tesseract.exe',
+                '/usr/bin/tesseract',
+                '/usr/local/bin/tesseract'
+            ]
+            
+            for path in possible_paths:
+                if os.path.exists(path):
+                    pytesseract.pytesseract.tesseract_cmd = path
+                    self.tesseract_path = path
+                    return
 
+            # 尝试环境变量检测
+            try:
+                subprocess.run(['tesseract', '--version'], check=True, 
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                self.tesseract_path = 'tesseract'
+                return
+            except:
+                messagebox.showwarning("OCR警告", 
+                    "Tesseract OCR未正确配置，文字提取功能受限\n"
+                    "请通过'设置OCR路径'按钮手动配置")
+        except Exception as e:
+            print(f"OCR初始化错误: {e}")
+    
     def generate_supported_extensions(self, formats):
         """生成带点的扩展名集合"""
         exts = set()
@@ -153,13 +205,14 @@ class DocToPdfConverter:
             word = win32com.client.Dispatch("Word.Application")
             word.Quit()
             return "word"
-        except:
-            try:
-                wps = win32com.client.Dispatch("Kwps.Application")
-                wps.Quit()
-                return "wps"
-            except:
-                return None
+        except Exception as e:
+            if getattr(sys, 'frozen', False):
+                return messagebox.askyesno(
+                    "Office未安装",
+                    "需要安装Microsoft Word或WPS才能转换文档\n"
+                    "是否现在访问下载页面？"
+                ) and webbrowser.open("https://www.wps.cn/")
+            return None
 
     def setup_file_section(self):
         """文件选择区域"""
@@ -282,26 +335,22 @@ class DocToPdfConverter:
         left_frame = ttk.Frame(action_frame)
         left_frame.pack(side=tk.LEFT, expand=True)
         
-        ttk.Button(
-            left_frame,
-            text="项目说明",
-            command=self.show_project_info,
-            width=15
-        ).pack(side=tk.LEFT, padx=5)
+        buttons = [
+            ("项目说明", self.show_project_info),
+            ("查看源码", self.view_source_code),
+            ("联系作者", self.contact_author),
+            ("提取文字", self.extract_text_from_image),
+            ("设置OCR路径", self.set_tesseract_path)  # 新增按钮
+        ]
         
-        ttk.Button(
-            left_frame,
-            text="查看源码",
-            command=self.view_source_code,
-            width=15
-        ).pack(side=tk.LEFT, padx=5)
-        
-        ttk.Button(
-            left_frame,
-            text="联系作者",
-            command=self.contact_author,
-            width=15
-        ).pack(side=tk.LEFT, padx=5)
+        for text, command in buttons:
+            ttk.Button(
+                left_frame,
+                text=text,
+                command=command,
+                width=15
+            ).pack(side=tk.LEFT, padx=5)
+
         
         # 右对齐按钮
         right_frame = ttk.Frame(action_frame)
@@ -332,6 +381,56 @@ class DocToPdfConverter:
             foreground=[('active', 'white'), ('!active', 'white')]
         )
 
+    def set_tesseract_path(self):
+        """设置 Tesseract 路径"""
+        path = filedialog.askopenfilename(
+            title="选择 Tesseract 可执行文件",
+            filetypes=[("可执行文件", "*.exe")]
+        )
+        if path:
+            pytesseract.pytesseract.tesseract_cmd = path
+            self.tesseract_path = path
+            self.update_status(f"Tesseract 路径已设置为: {path}")
+            messagebox.showinfo("成功", f"Tesseract 路径已设置为: {path}")
+
+    def show_ocr_result(self, text):
+        """显示OCR结果的增强界面"""
+        result_window = tk.Toplevel(self.master)
+        result_window.title("文字提取结果")
+        result_window.geometry("900x600")
+        
+        # 顶部按钮区域
+        btn_frame = ttk.Frame(result_window)
+        btn_frame.pack(fill=tk.X, padx=10, pady=5)
+        
+        ttk.Button(
+            btn_frame,
+            text="复制内容",
+            command=lambda: self.master.clipboard_append(text),
+            width=15
+        ).pack(side=tk.LEFT, padx=5)
+
+        # 文字显示区域
+        text_frame = ttk.Frame(result_window)
+        text_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        
+        scrollbar = ttk.Scrollbar(text_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        text_area = scrolledtext.ScrolledText(
+            text_frame,
+            wrap=tk.WORD,
+            yscrollcommand=scrollbar.set,
+            font=("微软雅黑", 10),
+            padx=10,
+            pady=10
+        )
+        text_area.pack(fill=tk.BOTH, expand=True)
+        text_area.insert(tk.END, text)
+        text_area.config(state=tk.DISABLED)
+        
+        scrollbar.config(command=text_area.yview)
+
     def setup_status_bar(self):
         """状态栏"""
         status_frame = ttk.Frame(self.master, relief=tk.SUNKEN)
@@ -353,12 +452,14 @@ class DocToPdfConverter:
             "📚 文档/图片转PDF工具\n\n"
             "🔹 项目诞生原因：\n"
             " 由一个懒癌晚期的大学生因为受不了某些软件广告式的转换界面\n"
+            " 和拿着开源收费的图片提取文字功能\n"
             " 而打造的一款极简工具\n"
             "🔹 主要功能：\n"
-            "• 支持Word、Excel、PPT等多种文档格式转PDF\n"
+            "• 支持Word等多种文档格式转PDF\n"
             "• 支持JPG、PNG等常见图片格式转PDF\n"
+            "• 支持从图片中提取文字\n"
             "• 简洁直观的用户界面\n\n"
-            "🔹 版本: 1.0.0\n"
+            "🔹 版本: 1.1.0\n"
             "© 2025 文档转换工具"
         )
 
@@ -366,11 +467,11 @@ class DocToPdfConverter:
         """查看源码"""
         result = messagebox.askyesno(
             "查看源码",
-            "即将跳转到GitHub查看项目源码，是否继续？"
+            "即将跳转到GitHub查看项目版本1.0.0的源码，是否继续？"
         )
         if result:
             try:
-                webbrowser.open("https://github.com/example/docxtopdf")
+                webbrowser.open("https://github.com/cxywh/To-pdf/blob/main/docxtopdf.py")
             except Exception as e:
                 messagebox.showerror("错误", f"无法打开网页: {str(e)}")
 
@@ -546,6 +647,34 @@ class DocToPdfConverter:
             messagebox.showerror("错误", f"图片转换失败: {str(e)}")
             self.update_status(f"错误: 图片转换失败 - {str(e)}")
             return False
+
+    def extract_text_from_image(self):
+        """从图片中提取文字"""
+        if not self.current_file:
+            messagebox.showwarning("警告", "请先选择图片文件！")
+            self.update_status("警告: 未选择文件")
+            return
+
+        try:
+            # 验证图片是否有效
+            if not self.is_valid_image(self.current_file):
+                return
+
+            # 提取文字
+            self.update_status(f"正在从图片中提取文字: {os.path.basename(self.current_file)}...")
+            text = pytesseract.image_to_string(Image.open(self.current_file), lang='chi_sim+eng')
+
+            if not text.strip():
+                messagebox.showinfo("提示", "未检测到文字！")
+                self.update_status("提示: 未检测到文字")
+                return
+
+            # 显示提取结果
+            self.show_ocr_result(text)
+
+        except Exception as e:
+            messagebox.showerror("错误", f"文字提取失败: {str(e)}")
+            self.update_status(f"错误: 文字提取失败 - {str(e)}")
 
     def start_conversion(self):
         """开始转换"""
